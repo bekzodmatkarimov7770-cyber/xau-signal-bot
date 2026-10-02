@@ -197,8 +197,10 @@ def build_analysis(c, src, forming, price):
         L.append('➡️ narx zona ichida: %.2f - %.2f (%d marta)' % (z['lo'], z['hi'], z['touches']))
     for z in sup:
         L.append('⬇️ qo\'llab-quvvat %.2f - %.2f  (-%.1f$, %d marta)' % (z['lo'], z['hi'], p - z['hi'], z['touches']))
-    if not (res or sup or inside):
-        L.append("yaqin zona topilmadi")
+    if not res:
+        L.insert(L.index('🧱 <b>Eng yaqin SNR zonalar:</b>') + 1, "⬆️ yuqorida tasdiqlangan SNR zona yo'q (SELL uchun SNR sharti bajarilmaydi)")
+    if not sup:
+        L.append("⬇️ pastda tasdiqlangan SNR zona yo'q (BUY uchun SNR sharti bajarilmaydi)")
     ab = sorted([l for l in mp['levels'] if l['side'] == 'high' and l['price'] > p], key=lambda l: l['price'])[:2]
     be = sorted([l for l in mp['levels'] if l['side'] == 'low' and l['price'] < p], key=lambda l: -l['price'])[:2]
     L += ['', '💧 <b>Tegilmagan likvidlik (sweep nishonlari):</b>']
