@@ -187,9 +187,9 @@ def build_analysis(c, src, forming, price):
                 txt = txt % ('%.1f' % CFG['min_rr'])
             L.append('\n%s <b>%s</b>: %s\n   ➜ %s' % (em, side, txt, _plan(side, diag, mp, price, forming)))
     p = price
-    res = sorted([z for z in mp['zones'] if z['lo'] > p], key=lambda z: z['lo'])[:2]
-    sup = sorted([z for z in mp['zones'] if z['hi'] < p], key=lambda z: -z['hi'])[:2]
-    inside = [z for z in mp['zones'] if z['lo'] <= p <= z['hi']]
+    res = sorted([z for z in mp['all_zones'] if z['lo'] > p], key=lambda z: z['lo'])[:2]
+    sup = sorted([z for z in mp['all_zones'] if z['hi'] < p], key=lambda z: -z['hi'])[:2]
+    inside = [z for z in mp['all_zones'] if z['lo'] <= p <= z['hi']]
     L += ['', '🧱 <b>Eng yaqin SNR zonalar:</b>']
     for z in reversed(res):
         L.append('⬆️ qarshilik %.2f - %.2f  (+%.1f$, %d marta)' % (z['lo'], z['hi'], z['lo'] - p, z['touches']))
