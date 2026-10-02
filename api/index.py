@@ -117,6 +117,101 @@ def load(n):
     return data.drop_incomplete(c), src
 
 
+def load_live(n=3000):
+    """(yopilgan shamlar, manba, hozirgi shakllanayotgan sham yoki None, jonli narx)."""
+    raw, src = data.fetch_m15(n)
+    if not raw:
+        raise RuntimeError("narx ma'lumoti kelmadi")
+    forming = raw[-1] if raw[-1]['t'] + 900 > time.time() else None
+    return data.drop_incomplete(raw), src, forming, raw[-1]['c']
+
+
+def _near_zone(mp, x):
+    return any(z['lo'] - mp['pad'] <= x <= z['hi'] + mp['pad'] for z in mp['all_zones'])
+
+
+def _plan(side, diag, mp, p, forming):
+    """Shu yo'nalishda signal chiqishi uchun nima kutilayotgani."""
+    sell = side == 'SELL'
+    w = diag.get(side.lower() + '_watch')
+    if w:
+        return ("sweep BO'LDI: %s %.2f %s soya %.2f. Endi M15 sham <b>%.2f</b> %s yopilsa (MSS), signal chiqadi. Muddat: %d sham."
+                % (KIND_UZ.get(w['level_kind'], w['level_kind']), w['level_price'], 'ustiga' if sell else 'ostiga',
+                   w['sweep_ext'], w['mss_level'], 'ostida' if sell else 'ustida', max(w['bars_left'], 0)))
+    if sell:
+        cands = sorted([l for l in mp['levels'] if l['side'] == 'high' and l['price'] > p], key=lambda l: l['price'])
+    else:
+        cands = sorted([l for l in mp['levels'] if l['side'] == 'low' and l['price'] < p], key=lambda l: -l['price'])
+    cands = [l for l in cands if abs(l['price'] - p) <= mp['atr'] * 6]
+    if not cands:
+        return "yaqin atrofda (6 ATR ichida) sweep nishoni yo'q."
+    lv = cands[0]
+    dist = abs(lv['price'] - p)
+    name = '%s %.2f (%s%.1f$)' % (KIND_UZ.get(lv['kind'], lv['kind']), lv['price'], '+' if sell else '-', dist)
+    snr = ('SNR zonada ✅' if _near_zone(mp, lv['price'])
+           else "SNR zonadan tashqarida ⚠️ (bu holatda signal chiqmaydi)")
+    pierced = forming and ((forming['h'] > lv['price']) if sell else (forming['l'] < lv['price']))
+    if pierced:
+        return ("hozirgi sham %s allaqachon %s chiqdi. Yopilishini kuting: %s yopilsa sweep, %s yopilsa breakout (signal yo'q). %s"
+                % (name, 'ustiga' if sell else 'ostiga', 'ostida' if sell else 'ustida',
+                   'ustida' if sell else 'ostida', snr))
+    return ("narx %s %s soya chiqarib, qaytib %s yopilsa sweep bo'ladi. %s. Keyin MSS va FVG/OB kutiladi."
+            % (name, 'ustiga' if sell else 'ostiga', 'ostida' if sell else 'ustida', snr))
+
+
+def build_analysis(c, src, forming, price):
+    """Jonli narx va oxirgi yopilgan shamlar asosida to'liq bozor tahlili (matn)."""
+    P = smc.Prep(c, CFG)
+    now = len(c) - 1
+    sig, diag = smc.find_signal(P, now, CFG)
+    mp = smc.market_map(P, now, CFG)
+    if mp is None:
+        return "Tahlil uchun ma'lumot yetarli emas.", None
+    last_close_t = c[-1]['t'] + 900
+    head = ("📡 <b>XAUUSD jonli tahlil</b>\nNarx: <b>%.2f</b>  (%s, Toshkent)\nStruktura oxirgi yopilgan sham (%s) bo'yicha."
+            % (price, tkh(time.time()), tkh(last_close_t)))
+    L = [head, '']
+    L.append("📈 H4 yo'nalish: <b>%s</b> (narx EMA50 %s)" % (mp['bias'], 'ostida' if mp['bias'] == 'pastga' else 'ustida'))
+    L.append('')
+    if sig:
+        gap = abs(sig['entry'] - price)
+        L.append("🔔 <b>SIGNAL BOR</b>\n")
+        L.append(fmt_signal(sig, ''))
+        L.append("\n<i>Narx kirishdan hozir $%.2f uzoqda.</i>" % gap)
+    else:
+        L.append("🎯 <b>Signal: hozircha yo'q</b>")
+        for side, em in (('SELL', '🟥'), ('BUY', '🟩')):
+            st = diag.get(side.lower(), 'no_sweep')
+            txt = STAGE_UZ.get(st, st)
+            if '%s' in txt:
+                txt = txt % ('%.1f' % CFG['min_rr'])
+            L.append('\n%s <b>%s</b>: %s\n   ➜ %s' % (em, side, txt, _plan(side, diag, mp, price, forming)))
+    p = price
+    res = sorted([z for z in mp['zones'] if z['lo'] > p], key=lambda z: z['lo'])[:2]
+    sup = sorted([z for z in mp['zones'] if z['hi'] < p], key=lambda z: -z['hi'])[:2]
+    inside = [z for z in mp['zones'] if z['lo'] <= p <= z['hi']]
+    L += ['', '🧱 <b>Eng yaqin SNR zonalar:</b>']
+    for z in reversed(res):
+        L.append('⬆️ qarshilik %.2f - %.2f  (+%.1f$, %d marta)' % (z['lo'], z['hi'], z['lo'] - p, z['touches']))
+    for z in inside:
+        L.append('➡️ narx zona ichida: %.2f - %.2f (%d marta)' % (z['lo'], z['hi'], z['touches']))
+    for z in sup:
+        L.append('⬇️ qo\'llab-quvvat %.2f - %.2f  (-%.1f$, %d marta)' % (z['lo'], z['hi'], p - z['hi'], z['touches']))
+    if not (res or sup or inside):
+        L.append("yaqin zona topilmadi")
+    ab = sorted([l for l in mp['levels'] if l['side'] == 'high' and l['price'] > p], key=lambda l: l['price'])[:2]
+    be = sorted([l for l in mp['levels'] if l['side'] == 'low' and l['price'] < p], key=lambda l: -l['price'])[:2]
+    L += ['', '💧 <b>Tegilmagan likvidlik (sweep nishonlari):</b>']
+    for l in reversed(ab):
+        L.append('⬆️ %s %.2f  (+%.1f$)' % (KIND_UZ.get(l['kind'], l['kind']), l['price'], l['price'] - p))
+    for l in be:
+        L.append('⬇️ %s %.2f  (-%.1f$)' % (KIND_UZ.get(l['kind'], l['kind']), l['price'], p - l['price']))
+    if not (ab or be):
+        L.append('yaqin likvidlik yo\'q')
+    L += ['', "<i>Bu tahlil, kafolat emas. Manba: %s</i>" % esc(src)]
+    return '\n'.join(L), sig
+
+
 def run_scan(notify=True):
     c, src = load(3000)
     if len(c) < 900:
@@ -150,38 +245,46 @@ def cmd_start(m):
         return
     safe_send(m.chat.id,
               "<b>XAUUSD signal bot</b>\nSMC + Liquidity Sweep + Classic SNR\n\n"
-              "/signal - hozirgi holatni tekshirish\n"
+              "<b>signal</b> deb yozing: bozor shu zahoti jonli narx bilan tahlil qilinadi\n"
               "/zones - narx atrofidagi SNR zonalar va likvidlik\n"
               "/backtest - strategiyani tarixiy ma'lumotda sinash\n"
               "/tarix - oxirgi signallar\n"
               "/sozlama - joriy sozlamalar\n\n"
-              "Signal avtomatik keladi (har 15 daqiqada tekshiriladi).")
+              "Bot o'zi xabar yubormaydi, faqat siz so'raganda tahlil qiladi.")
+
+
+def _analyze_reply(chat_id):
+    try:
+        c, src, forming, price = load_live(3000)
+    except Exception as e:  # noqa: BLE001
+        log.exception('analyze load')
+        return safe_send(chat_id, "⚠️ Narx ma'lumotini olib bo'lmadi: %s" % esc(e))
+    if len(c) < 900:
+        return safe_send(chat_id, "⚠️ Tahlil uchun ma'lumot yetarli emas (%d sham)." % len(c))
+    age_min = (time.time() - (c[-1]['t'] + 900)) / 60.0
+    if age_min > 90:
+        return safe_send(chat_id, "⏸ Oltin bozori hozir yopiq (oxirgi sham %d daqiqa oldin, narx %.2f). Dushanba ertalab ochiladi."
+                         % (age_min, price))
+    try:
+        text, sig = build_analysis(c, src, forming, price)
+    except Exception as e:  # noqa: BLE001
+        log.exception('analyze')
+        return safe_send(chat_id, "⚠️ Tahlil bajarilmadi: %s" % esc(e))
+    if sig:
+        store.save_signal(sig)
+    safe_send(chat_id, text)
 
 
 @bot.message_handler(commands=['signal'])
 def cmd_signal(m):
-    if not guard(m):
-        return
-    try:
-        res, sig, ctx = run_scan(notify=False)
-    except Exception as e:  # noqa: BLE001
-        log.exception('signal')
-        return safe_send(m.chat.id, "⚠️ Tekshirib bo'lmadi: %s" % esc(e))
-    if sig:
-        return safe_send(m.chat.id, "🔎 <b>Hozir signal bor</b> (bu qo'lda tekshiruv):\n\n" + fmt_signal(sig, ctx[2]))
-    if 'diag' not in res:
-        return safe_send(m.chat.id, '⏸ ' + esc(res.get('msg', '')))
-    d = res['diag']
-    parts = []
-    for name in ('sell', 'buy'):
-        st = d.get(name, 'no_sweep')
-        txt = STAGE_UZ.get(st, st)
-        if '%s' in txt:
-            txt = txt % ('%.1f' % CFG['min_rr'])
-        parts.append('%s: %s' % (name.upper(), txt))
-    safe_send(m.chat.id,
-              "🔎 Hozir signal yo'q.\nNarx: <b>%.2f</b>, ATR(M15): %.2f\nSNR zonalar: %d ta, likvidlik darajalari: %d ta\n\n%s"
-              % (d['price'], d['atr'], d['zones'], d['levels'], '\n'.join(parts)))
+    if guard(m):
+        _analyze_reply(m.chat.id)
+
+
+@bot.message_handler(func=lambda m: bool(getattr(m, 'text', None)) and m.text.strip().lower().strip('!.?') in ('signal', 'сигнал', 'analiz', 'tahlil'))
+def txt_signal(m):
+    if guard(m):
+        _analyze_reply(m.chat.id)
 
 
 @bot.message_handler(commands=['zones'])
@@ -308,6 +411,18 @@ def do_scan():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+def do_analyze():
+    if not _ok(CRON_SECRET):
+        return 'Forbidden', 403
+    try:
+        c, src, forming, price = load_live(3000)
+        text, _ = build_analysis(c, src, forming, price)
+        return jsonify({'ok': True, 'text': text})
+    except Exception as e:  # noqa: BLE001
+        log.exception('analyze')
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST'])
 @app.route('/<path:path>', methods=['GET', 'POST'])
 def entry(path):
@@ -316,6 +431,8 @@ def entry(path):
             return do_ulash()
         if 'scan' in request.args:
             return do_scan()
+        if 'analyze' in request.args:
+            return do_analyze()
         return 'XAUUSD signal bot ishlayapti.', 200
     token = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
     if not WEBHOOK_SECRET or not hmac.compare_digest(token, WEBHOOK_SECRET):

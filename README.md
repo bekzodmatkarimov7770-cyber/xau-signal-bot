@@ -1,7 +1,8 @@
 # XAUUSD signal bot: SMC + Liquidity Sweep + Classic SNR
 
-Bot oltin (XAUUSD) M15 grafigini har 15 daqiqada tekshiradi va **faqat** uchala sharoit
-birgalikda kelganda Telegram'ga signal yuboradi.
+Bot faqat oltin (XAUUSD) uchun. U **o'zi xabar yubormaydi**: botga **signal** deb yozasiz,
+u shu zahoti jonli narx bilan bozorni tahlil qiladi (yo'nalish, SNR zonalar, likvidlik, signal yoki nimani kutish kerakligi).
+Signal faqat uchala sharoit birgalikda kelganda beriladi.
 
 ## Mantiq (SELL; BUY teskarisi)
 1. **SNR**: H4 da narx kamida 2 marta qaytgan zona.
@@ -27,13 +28,14 @@ yuqori sifatli likvidlik 1 + London/NY sessiyasi 1 + H4 EMA50 yo'nalishi 1. Stan
    aks holda Telegram va cron botga kira olmaydi.
 5. Fayllarni GitHub repoga yuklang (Vercel o'zi joylashtiradi).
 6. Brauzerda oching: `https://<sayt>.vercel.app/ulash?key=<WEBHOOK_SECRET>`
-7. **Avtomatik tekshiruv**: cron-job.org (bepul) da vazifa yarating:
+7. **(Ixtiyoriy) Avtomatik tekshiruv.** Standart rejim: faqat siz "signal" deganda tahlil qiladi, cron kerak emas.
+   Agar bot o'zi ham signal yuborsin desangiz, cron-job.org (bepul) da vazifa yarating:
    - URL: `https://<sayt>.vercel.app/scan?key=<CRON_SECRET yoki WEBHOOK_SECRET>`
    - Jadval (UTC): `1,16,31,46 * * * *` (har 15 daqiqada, sham yopilgandan 1 daqiqa keyin)
    (Vercel Hobby rejasida cron faqat kuniga bir marta ishlaydi, shuning uchun tashqi cron kerak.)
 
 ## Telegram buyruqlari (faqat ADMIN_ID)
-`/signal` hozirgi holat va nima yetishmayotgani | `/zones` SNR zonalar va likvidlik xaritasi |
+**`signal`** (yoki `/signal`) jonli tahlil | `/zones` SNR zonalar va likvidlik xaritasi |
 `/backtest` strategiyani tarixda sinash | `/tarix` oxirgi signallar | `/sozlama`
 
 ## Ishga tushirishdan oldin

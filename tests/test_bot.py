@@ -39,7 +39,10 @@ with mock.patch.object(D, 'fetch_m15', lambda n_=3000: ([dict(b) for b in c_sig]
     r = cl.get('/?scan=1&key=sekret').get_json()
     assert r['signal'] and not r['sent'] and len(sent) == k, 'takroriy signal yuborilmasligi kerak'
     print('OK dedup: ikkinchi skanerda signal qayta yuborilmadi')
-    assert 'Hozir signal bor' in cmd('/signal')
+    a_txt = cmd('/signal')
+    assert 'SIGNAL BOR' in a_txt and 'jonli tahlil' in a_txt and 'Eng yaqin SNR zonalar' in a_txt and 'Tegilmagan likvidlik' in a_txt
+    assert 'SIGNAL BOR' in cmd('signal'), "oddiy 'signal' so'zi ham ishlashi kerak"
+    assert 'SIGNAL BOR' in cmd('  Signal! ')
     assert 'Kirish yopiq' in cmd('/signal', uid=555)
     z = cmd('/zones'); assert 'SNR zonalar' in z and 'Likvidlik' in z
     t = cmd('/tarix'); assert 'Oxirgi signallar' in t
@@ -49,12 +52,19 @@ with mock.patch.object(D, 'fetch_m15', lambda n_=3000: ([dict(b) for b in c_sig]
 # signal bo'lmagan payt va yopiq bozor
 c_none = series[:600 + 280]
 with mock.patch.object(D, 'fetch_m15', lambda n_=3000: ([dict(b) for b in series[:1000]], 'TEST')), mock.patch('time.time', lambda: series[999]['t'] + 960):
-    txt = cmd('/signal')
-    print(txt.replace('\n', ' | '))
-    assert 'Hozir signal' in txt or 'signal bor' in txt
+    txt = cmd('signal')
+    print(txt)
+    assert 'Signal: hozircha yo\'q' in txt and 'SELL' in txt and 'BUY' in txt and 'H4 yo\'nalish' in txt
 with mock.patch.object(D, 'fetch_m15', lambda n_=3000: ([dict(b) for b in series[:1000]], 'TEST')), mock.patch('time.time', lambda: series[999]['t'] + 960 + 7200):
     r = cl.get('/?scan=1&key=sekret').get_json(); assert 'bozor yopiq' in r['msg'], r
     print('OK bozor yopiq: skaner jim turadi')
+
+# sweep bo'lgan, MSS kutilayotgan payt: reja matnida aniq daraja ko'rsatilishi kerak
+wi = next((i for i in range(900, 2500) if any(k.endswith('_watch') for k in S.find_signal(P, i, I.CFG)[1])), None)
+assert wi is not None
+with mock.patch.object(D, 'fetch_m15', lambda n_=3000: ([dict(b) for b in series[:wi + 1]], 'TEST')), mock.patch('time.time', lambda: series[wi]['t'] + 960):
+    txt = cmd('signal'); print(txt)
+    assert "sweep BO'LDI" in txt and 'MSS' in txt
 
 big = T.rw(5000, 5)
 with mock.patch.object(D, 'fetch_m15', lambda n_=3000: ([dict(b) for b in big], 'TEST')), mock.patch('time.time', lambda: big[-1]['t'] + 960):

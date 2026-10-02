@@ -295,7 +295,7 @@ def _context(P, now, cfg):
 
 
 # ----------------------------------------------------------------- asosiy qidiruv (SELL ko'rinishida)
-def _scan_dir(V, T, now, levels, zones, a, bias_ok, sess_ok, cfg):
+def _scan_dir(V, T, now, levels, zones, a, bias_ok, sess_ok, cfg, watch=None):
     O, H, L, C = V.O, V.H, V.L, V.C
     stage = 'no_sweep'
 
@@ -352,6 +352,9 @@ def _scan_dir(V, T, now, levels, zones, a, bias_ok, sess_ok, cfg):
             if C[k_] < piv[1]:
                 m = k_
                 break
+        if m is None and watch is not None and j + cfg['mss_max_bars'] >= now and j > watch.get('j', -1):
+            watch.update({'j': j, 'level_kind': lev['kind'], 'level_price': lev['price'], 'sweep_ext': sw_hi,
+                          'mss_level': piv[1], 'bars_left': j + cfg['mss_max_bars'] - now})
         if m is None or m < now - 1:
             continue
         up('no_zone')
@@ -441,8 +444,14 @@ def find_signal(P, now, cfg=CFG):
         lv = ctx['levels'] if s == 1 else _mirror_levels(ctx['levels'])
         zn = ctx['zones'] if s == 1 else _mirror_zones(ctx['zones'])
         bias = ctx['bias_sell'] if s == 1 else ctx['bias_buy']
-        cand, stage = _scan_dir(P.v[s], P.T, now, lv, zn, ctx['a'], bias, ctx['sess'], cfg)
+        w = {}
+        cand, stage = _scan_dir(P.v[s], P.T, now, lv, zn, ctx['a'], bias, ctx['sess'], cfg, watch=w)
         diag[name.lower()] = stage
+        if w:
+            f = (lambda x: x) if s == 1 else (lambda x: -x)
+            diag[name.lower() + '_watch'] = {'level_kind': w['level_kind'], 'level_price': f(w['level_price']),
+                                             'sweep_ext': f(w['sweep_ext']), 'mss_level': f(w['mss_level']),
+                                             'bars_left': w['bars_left']}
         if cand:
             res.append(_finish(cand, s, name, P))
     if not res:
@@ -452,14 +461,25 @@ def find_signal(P, now, cfg=CFG):
 
 
 def market_map(P, now, cfg=CFG):
-    """/zones buyrug'i uchun: narx atrofidagi SNR zonalar va likvidlik darajalari."""
+    """Jonli tahlil uchun: narx atrofidagi SNR zonalar va hali tegilmagan likvidlik darajalari."""
     ctx = _context(P, now, cfg)
     if ctx is None:
         return None
     price = P.c[now]['c']
+    H, L = P.v[1].H, P.v[1].L
+    live = []
+    for lv in ctx['levels']:
+        st = lv['f'] + 1
+        if st <= now:
+            if lv['side'] == 'high' and max(H[st:now + 1]) > lv['price']:
+                continue
+            if lv['side'] == 'low' and min(L[st:now + 1]) < lv['price']:
+                continue
+        live.append(lv)
     zs = sorted(ctx['zones'], key=lambda z: abs((z['lo'] + z['hi']) / 2 - price))[:6]
     return {'price': price, 'atr': ctx['a'], 'zones': sorted(zs, key=lambda z: -z['hi']),
-            'levels': sorted(ctx['levels'], key=lambda x: -x['price']),
+            'all_zones': ctx['zones'], 'pad': cfg['snr_pad_atr'] * ctx['a'],
+            'levels': sorted(live, key=lambda x: -x['price']),
             'bias': 'pastga' if ctx['bias_sell'] else 'yuqoriga'}
 
 
