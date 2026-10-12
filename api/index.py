@@ -1,4 +1,4 @@
-"""XAUUSD signal bot (SMC + Liquidity Sweep + Classic SNR). Vercel + Flask + Telegram.
+"""XAUUSD signal bot (SMC + Liquidity Sweep + Classic SNR, alohida ICT modeli). Vercel + Flask + Telegram.
 
 Muhit o'zgaruvchilari (Vercel > Settings > Environment Variables):
   BOT_TOKEN        - @BotFather dan olingan bot tokeni (MAJBURIY)
@@ -7,10 +7,13 @@ Muhit o'zgaruvchilari (Vercel > Settings > Environment Variables):
   TWELVE_API_KEY   - twelvedata.com bepul kaliti (tavsiya; bo'lmasa Yahoo GC=F ishlatiladi)
   CRON_SECRET      - /scan uchun kalit (bo'lmasa WEBHOOK_SECRET ishlatiladi)
   MIN_SCORE, MIN_RR, ENTRY_TIMEOUT - ixtiyoriy sozlamalar
+  ICT_MIN_SCORE    - ICT signal uchun minimal ball (10 dan, standart 7)
+  ANTHROPIC_API_KEY - skrinshot tahlili uchun (ixtiyoriy; bo'lmasa rasm tahlili o'chiq)
   UPSTASH_REDIS_REST_URL / _TOKEN yoki KV_REST_API_URL / _TOKEN - ixtiyoriy doimiy baza
 """
 import hmac
 import html
+import io
 import logging
 import os
 import sys
@@ -22,8 +25,10 @@ import telebot  # noqa: E402
 from flask import Flask, jsonify, request  # noqa: E402
 
 import _data as data  # noqa: E402
+import _ict as ict  # noqa: E402
 import _smc as smc  # noqa: E402
 import _store as store  # noqa: E402
+import _vision as vision  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger('signalbot')
@@ -42,12 +47,20 @@ for env, key, cast in (('MIN_SCORE', 'min_score', int), ('MIN_RR', 'min_rr', flo
         except ValueError:
             log.warning('%s noto\'g\'ri: %s', env, os.environ[env])
 
+ICT_CFG = dict(ict.CFG)
+if os.environ.get('ICT_MIN_SCORE'):
+    try:
+        ICT_CFG['min_score'] = int(os.environ['ICT_MIN_SCORE'])
+    except ValueError:
+        log.warning("ICT_MIN_SCORE noto'g'ri: %s", os.environ['ICT_MIN_SCORE'])
+
 bot = telebot.TeleBot(BOT_TOKEN or '0:missing', threaded=False)
 app = Flask(__name__)
 
 KIND_UZ = {'PDH': 'kecha high', 'PDL': 'kecha low', 'PWH': "o'tgan hafta high", 'PWL': "o'tgan hafta low",
            'ASH': 'Osiyo sessiyasi high', 'ASL': 'Osiyo sessiyasi low',
-           'EQH': 'teng yuqorilar (EQH)', 'EQL': 'teng pastlar (EQL)', 'SNR': 'SNR zona', 'RR': 'RR chegarasi'}
+           'EQH': 'teng yuqorilar (EQH)', 'EQL': 'teng pastlar (EQL)', 'SNR': 'SNR zona', 'RR': 'RR chegarasi',
+           'LOH': 'London high', 'LOL': 'London low'}
 STAGE_UZ = {
     'no_sweep': "likvidlik sweep'i yo'q", 'sweep_no_snr': "sweep bor, lekin SNR zonasida emas",
     'sweep_no_mss': 'sweep va SNR bor, MSS (struktura buzilishi) kutilmoqda',
@@ -78,6 +91,13 @@ def safe_send(chat, text, **kw):
         return bot.send_message(int(chat), text, parse_mode='HTML', **kw)
     except Exception:  # noqa: BLE001
         log.exception('send_message')
+
+
+def send_photo(chat, png, caption=''):
+    try:
+        return bot.send_photo(int(chat), io.BytesIO(png), caption=caption[:1024] or None, parse_mode='HTML')
+    except Exception:  # noqa: BLE001
+        log.exception('send_photo')
 
 
 def fmt_signal(s, source=''):
@@ -246,10 +266,14 @@ def cmd_start(m):
     if not guard(m):
         return
     safe_send(m.chat.id,
-              "<b>XAUUSD signal bot</b>\nSMC + Liquidity Sweep + Classic SNR\n\n"
-              "<b>signal</b> deb yozing: bozor shu zahoti jonli narx bilan tahlil qilinadi\n"
+              "<b>XAUUSD signal bot</b>\nSMC + Liquidity Sweep + Classic SNR, alohida ICT modeli\n\n"
+              "<b>signal</b> deb yozing: SMC bo'yicha jonli tahlil\n"
+              "<b>ict</b> deb yozing: ICT bo'yicha alohida tahlil, signal va grafik rasm\n"
+              "<b>rasm</b> deb yozing: zonalar va likvidlik chizilgan grafik\n"
+              "📷 Grafik skrinshotini yuboring: AI uni ICT/SMC bo'yicha tahlil qiladi\n\n"
               "/zones - narx atrofidagi SNR zonalar va likvidlik\n"
-              "/backtest - strategiyani tarixiy ma'lumotda sinash\n"
+              "/backtest - SMC strategiyasini tarixda sinash\n"
+              "/ictbacktest - ICT modelini tarixda sinash\n"
               "/tarix - oxirgi signallar\n"
               "/sozlama - joriy sozlamalar\n\n"
               "Bot o'zi xabar yubormaydi, faqat siz so'raganda tahlil qiladi.")
@@ -380,6 +404,298 @@ def cmd_cfg(m):
     safe_send(m.chat.id, '⚙️ <b>Sozlamalar</b>\n' + '\n'.join('%s = %s' % (k, CFG[k]) for k in keys)
               + "\n\n<i>MIN_SCORE, MIN_RR, ENTRY_TIMEOUT ni Vercel muhit o'zgaruvchilari orqali o'zgartirasiz.</i>"
               + ("\n\n✅ Doimiy baza ulangan." if store.persistent() else "\n\n⚠️ Doimiy baza yo'q: takroriy signal himoyasi vaqtincha."))
+
+
+# ----------------------------------------------------------------- ICT (alohida model)
+ICT_STAGE_UZ = {
+    'no_sweep': "killzone ichida likvidlik sweep'i yo'q",
+    'sweep_no_mss': "sweep bor, MSS (displacement bilan struktura buzilishi) kutilmoqda",
+    'no_fvg': "MSS bor, lekin displacement FVG qoldirmadi",
+    'filled': "setup bo'ldi, narx FVG ga allaqachon qaytib ketgan",
+    'risk_fail': "SL masofasi mos kelmadi", 'rr_fail': "TP nishon 1:%s ga yetmaydi",
+    'score_low': "ball yetarli emas", 'ok': 'signal bor', 'data': "ma'lumot yetarli emas",
+}
+BIAS_UZ = {'down': 'pastga (bearish)', 'up': 'yuqoriga (bullish)', None: "aniq emas (range)"}
+
+
+def fmt_ict_signal(s):
+    sell = s['side'] == 'SELL'
+    em = '🟥' if sell else '🟩'
+    risk = abs(s['sl'] - s['entry'])
+    why = [
+        "• Killzone: %s" % s['kz'],
+        "• Likvidlik: %s %.2f %s olindi (cho'qqi %.2f)" % (esc(KIND_UZ.get(s['level']['kind'], s['level']['kind'])),
+                                                      s['level']['price'], 'ustidan' if sell else 'ostidan', s['sweep_ext']),
+        "• MSS: %.2f %s displacement bilan yopildi%s" % (s['mss_level'], 'ostiga' if sell else 'ustiga',
+                                                        ' (kuchli)' if s['strong'] else ''),
+        "• FVG: %.2f - %.2f, kirish CE (o'rtasi)%s" % (s['ez']['lo'], s['ez']['hi'],
+                                                       ', OTE bilan ustma-ust ✅' if s['in_ote'] else ''),
+        "• OTE zona (0.62-0.79): %.2f - %.2f" % (s['ote']['lo'], s['ote']['hi']),
+        "• H4 struktura %s" % ("mos ✅" if s['bias_ok'] else "mos emas ⚠️"),
+        "• Midnight Open'ga nisbatan %s" % (("premium'da sotish ✅" if sell else "discount'da sotib olish ✅")
+                                            if s['prem'] else "noqulay tomonda ⚠️"),
+    ]
+    L = ["%s <b>ICT %s XAUUSD</b>  |  ball %d/%d" % (em, s['side'], s['score'], ict.MAX_SCORE),
+         "📍 Kirish (limit): <b>%.2f</b>" % s['entry'],
+         "🛑 SL: <b>%.2f</b>  (xavf $%.2f)" % (s['sl'], risk),
+         "🎯 TP: <b>%.2f</b>  (1:%.1f, %s)" % (s['tp'], s['rr'], esc(KIND_UZ.get(s['tpk'], s['tpk'])))]
+    if s.get('tp2'):
+        L.append("🎯 TP2: <b>%.2f</b>" % s['tp2'])
+    L += ['', '<b>Nima uchun:</b>'] + why
+    L += ['', "⏱ Sweep %s, MSS %s (Toshkent vaqti)" % (tkh(s['sweep_t']), tkh(s['mss_t'])),
+          "❗️ Limit 3 soatda to'lmasa yoki narx avval TP ga yetsa, bekor qiling.",
+          "⚠️ Kafolat yo'q. Bitta savdoda balansning 0.5-1% idan ko'p xavf qilmang."]
+    return '\n'.join(L)
+
+
+def _ict_plan(side, diag):
+    w = diag.get(side.lower() + '_watch')
+    if not w:
+        return ''
+    sell = side == 'SELL'
+    return ("\n   ➜ sweep BO'LDI: %s %.2f %s (cho'qqi %.2f). M15 sham <b>%.2f</b> %s displacement bilan yopilsa MSS. Muddat: %d sham."
+            % (KIND_UZ.get(w['level_kind'], w['level_kind']), w['level_price'], 'ustidan' if sell else 'ostidan',
+               w['sweep_ext'], w['mss_level'], 'ostida' if sell else 'ustida', max(w['bars_left'], 0)))
+
+
+def build_ict(c, src, price):
+    """ICT tahlil matni. Qaytaradi: (matn, signal|None, ict_map|None, Prep, now)."""
+    P = smc.Prep(c, ICT_CFG)
+    now = len(c) - 1
+    sig, diag = ict.find_signal(P, now, ICT_CFG)
+    im = ict.ict_map(P, now, ICT_CFG)
+    if im is None:
+        return "ICT tahlil uchun ma'lumot yetarli emas.", None, None, P, now
+    L = ["🕯 <b>XAUUSD ICT tahlil</b>", "Narx: <b>%.2f</b>  (%s, Toshkent)" % (price, tkh(time.time())), '']
+    if im['kz_now']:
+        L.append("⏰ Hozir killzone: <b>%s</b> ✅" % im['kz_now'])
+    else:
+        nz, nt = im['kz_next']
+        L.append("⏰ Killzone emas. Keyingisi: <b>%s</b> %s da (Toshkent)" % (nz, tkh(nt)) if nz else "⏰ Killzone emas")
+    L.append("📈 H4 struktura: <b>%s</b>" % BIAS_UZ[im['bias']])
+    if im['mo'] is not None:
+        L.append("🌙 Midnight Open: %.2f (narx %s, %+.1f$)" % (im['mo'], 'ustida' if price > im['mo'] else 'ostida', price - im['mo']))
+    if im['eq'] is not None:
+        L.append("⚖️ Kechagi diapazon bo'yicha: <b>%s</b> (o'rtasi %.2f)" % (im['pd_zone'], im['eq']))
+    if im['asia']:
+        L.append("🌏 Osiyo diapazoni: %.2f - %.2f" % (im['asia']['l'], im['asia']['h']))
+    if im['london']:
+        L.append("🇬🇧 London diapazoni: %.2f - %.2f" % (im['london']['l'], im['london']['h']))
+    L.append('')
+    if sig:
+        L += ["🔔 <b>ICT SIGNAL BOR</b>", '', fmt_ict_signal(sig),
+              "\n<i>Narx kirishdan hozir $%.2f uzoqda.</i>" % abs(sig['entry'] - price)]
+    else:
+        L.append("🎯 <b>ICT signal: hozircha yo'q</b>")
+        for side, em in (('SELL', '🟥'), ('BUY', '🟩')):
+            st = diag.get(side.lower(), 'no_sweep')
+            txt = ICT_STAGE_UZ.get(st, st)
+            if '%s' in txt:
+                txt = txt % ('%.1f' % ICT_CFG['min_rr'])
+            L.append("%s <b>%s</b>: %s%s" % (em, side, txt, _ict_plan(side, diag)))
+    L += ['', "💧 <b>Likvidlik (ICT darajalari):</b>"]
+    for lv in im['levels']:
+        if abs(lv['price'] - price) > im['atr'] * 25:
+            continue
+        L.append("%s %s %.2f  (%+.1f$)%s" % ('⬆️' if lv['price'] > price else '⬇️', KIND_UZ.get(lv['kind'], lv['kind']),
+                                            lv['price'], lv['price'] - price, '  olingan ✔︎' if lv['taken'] else ''))
+    L += ['', "<i>Bu tahlil, kafolat emas. Manba: %s</i>" % esc(src)]
+    return '\n'.join(L), sig, im, P, now
+
+
+def chart_ict(c, im, sig):
+    import _chart as chart
+    levels, boxes, marks = [], [], []
+    if im:
+        if im['mo'] is not None:
+            levels.append((im['mo'], 'Midnight Open', chart.COL['mo'], '--'))
+        for lv in im['levels']:
+            col = chart.COL['taken'] if lv['taken'] else chart.COL['liq']
+            levels.append((lv['price'], lv['kind'], col, ':' if lv['taken'] else '-'))
+        for key, name, col in (('asia', 'Osiyo', chart.COL['asia']), ('london', 'London', chart.COL['london'])):
+            r = im.get(key)
+            if r:
+                boxes.append((c[r['first']]['t'], c[r['last']]['t'] + 900, r['l'], r['h'], name, col))
+    if sig:
+        boxes.append((c[sig['fvg_i'] - 2]['t'], c[-1]['t'] + 900 * 6, sig['ez']['lo'], sig['ez']['hi'], 'FVG', chart.COL['fvg']))
+        boxes.append((sig['sweep_t'], c[-1]['t'] + 900 * 6, sig['ote']['lo'], sig['ote']['hi'], 'OTE', chart.COL['ote']))
+        marks.append((sig['hi_t'], sig['sweep_ext'], 'sweep'))
+        marks.append((sig['mss_t'], sig['mss_level'], 'MSS'))
+    title = 'XAUUSD ICT' + (' | %s signal, ball %d/%d' % (sig['side'], sig['score'], ict.MAX_SCORE) if sig else '')
+    note = 'Sariq: olinmagan likvidlik, kulrang: olingan. Ko\'k quti: Osiyo, havorang: London.'
+    return chart.render(c, title=title, levels=levels, boxes=boxes, signal=sig, marks=marks, note=note)
+
+
+def chart_smc(c, mp, sig):
+    import _chart as chart
+    zones, levels, boxes, marks = [], [], [], []
+    if mp:
+        for z in mp['all_zones']:
+            zones.append((z['lo'], z['hi'], 'SNR x%d' % z['touches'], chart.COL['zone']))
+        for lv in mp['levels']:
+            levels.append((lv['price'], lv['kind'], chart.COL['liq'], '-'))
+    if sig:
+        boxes.append((sig['mss_t'] - 900 * 3, c[-1]['t'] + 900 * 6, sig['ez']['lo'], sig['ez']['hi'],
+                      'FVG/OB', chart.COL['fvg']))
+        marks.append((sig['sweep_t'], sig['sweep_ext'], 'sweep'))
+        marks.append((sig['mss_t'], sig['mss_level'], 'MSS'))
+    title = 'XAUUSD SMC | H4 yo\'nalish: %s' % (mp['bias'] if mp else '?')
+    if sig:
+        title += ' | %s signal, ball %d/%d' % (sig['side'], sig['score'], smc.MAX_SCORE)
+    return chart.render(c, title=title, zones=zones, levels=levels, boxes=boxes, signal=sig, marks=marks,
+                        note='Binafsha: SNR zonalar (H4), sariq: tegilmagan likvidlik.')
+
+
+def _live_or_reply(chat_id):
+    """Jonli ma'lumot; xato yoki bozor yopiq bo'lsa foydalanuvchiga yozib, None qaytaradi."""
+    try:
+        c, src, forming, price = load_live(3000)
+    except Exception as e:  # noqa: BLE001
+        log.exception('load_live')
+        safe_send(chat_id, "⚠️ Narx ma'lumotini olib bo'lmadi: %s" % esc(e))
+        return None
+    if len(c) < 900:
+        safe_send(chat_id, "⚠️ Tahlil uchun ma'lumot yetarli emas (%d sham)." % len(c))
+        return None
+    age_min = (time.time() - (c[-1]['t'] + 900)) / 60.0
+    if age_min > 90:
+        safe_send(chat_id, "⏸ Oltin bozori hozir yopiq (oxirgi sham %d daqiqa oldin, narx %.2f)." % (age_min, price))
+        return None
+    return c, src, forming, price
+
+
+def _ict_reply(chat_id):
+    live = _live_or_reply(chat_id)
+    if not live:
+        return
+    c, src, _, price = live
+    try:
+        text, sig, im, _, _ = build_ict(c, src, price)
+    except Exception as e:  # noqa: BLE001
+        log.exception('ict')
+        return safe_send(chat_id, "⚠️ ICT tahlil bajarilmadi: %s" % esc(e))
+    if sig:
+        store.save_signal(sig)
+    safe_send(chat_id, text)
+    try:
+        send_photo(chat_id, chart_ict(c, im, sig), caption='🕯 ICT grafik (M15)')
+    except Exception:  # noqa: BLE001
+        log.exception('chart_ict')
+
+
+def _chart_reply(chat_id):
+    live = _live_or_reply(chat_id)
+    if not live:
+        return
+    c, src, _, price = live
+    try:
+        P = smc.Prep(c, CFG)
+        now = len(c) - 1
+        sig, _ = smc.find_signal(P, now, CFG)
+        mp = smc.market_map(P, now, CFG)
+        png = chart_smc(c, mp, sig)
+    except Exception as e:  # noqa: BLE001
+        log.exception('chart')
+        return safe_send(chat_id, "⚠️ Grafik chizilmadi: %s" % esc(e))
+    cap = "🖼 <b>XAUUSD</b> %.2f | H4: %s | SMC signal: %s" % (price, mp['bias'] if mp else '?',
+                                                            ('%s %.2f' % (sig['side'], sig['entry'])) if sig else "yo'q")
+    send_photo(chat_id, png, caption=cap)
+
+
+def _ict_context():
+    """AI ga qo'shimcha ma'lumot: jonli narx va ICT darajalari (xato bo'lsa bo'sh)."""
+    try:
+        c, src, _, price = load_live(3000)
+        P = smc.Prep(c, ICT_CFG)
+        im = ict.ict_map(P, len(c) - 1, ICT_CFG)
+        if not im:
+            return ''
+        parts = ['XAUUSD hozir %.2f (%s)' % (price, src), 'H4 struktura: %s' % BIAS_UZ[im['bias']]]
+        if im['mo'] is not None:
+            parts.append('Midnight Open %.2f' % im['mo'])
+        parts += ['%s %.2f%s' % (lv['kind'], lv['price'], ' (olingan)' if lv['taken'] else '') for lv in im['levels']]
+        return '; '.join(parts)
+    except Exception:  # noqa: BLE001
+        log.exception('ict_context')
+        return ''
+
+
+@bot.message_handler(commands=['ict'])
+def cmd_ict(m):
+    if guard(m):
+        _ict_reply(m.chat.id)
+
+
+@bot.message_handler(func=lambda m: bool(getattr(m, 'text', None)) and m.text.strip().lower().strip('!.?') in ('ict', 'ict signal', 'айсити'))
+def txt_ict(m):
+    if guard(m):
+        _ict_reply(m.chat.id)
+
+
+@bot.message_handler(commands=['rasm', 'chart', 'grafik'])
+def cmd_chart(m):
+    if guard(m):
+        _chart_reply(m.chat.id)
+
+
+@bot.message_handler(func=lambda m: bool(getattr(m, 'text', None)) and m.text.strip().lower().strip('!.?') in ('rasm', 'grafik', 'chart'))
+def txt_chart(m):
+    if guard(m):
+        _chart_reply(m.chat.id)
+
+
+@bot.message_handler(commands=['ictbacktest'])
+def cmd_ict_backtest(m):
+    if not guard(m):
+        return
+    safe_send(m.chat.id, "⏳ ICT modeli tarixiy ma'lumotda sinalmoqda...")
+    try:
+        c, src = load(5000)
+        r = smc.backtest(c, ICT_CFG, finder=ict.find_signal)
+    except Exception as e:  # noqa: BLE001
+        log.exception('ictbacktest')
+        return safe_send(m.chat.id, "⚠️ Backtest bajarilmadi: %s" % esc(e))
+    safe_send(m.chat.id, fmt_backtest(r, src).replace('📊 <b>Backtest', '📊 <b>ICT backtest', 1))
+
+
+def _image_bytes(m):
+    """Xabardagi rasmni yuklab oladi (photo yoki rasm-fayl). Yo'q bo'lsa None."""
+    if getattr(m, 'photo', None):
+        fid = m.photo[-1].file_id
+    elif getattr(m, 'document', None) and (m.document.mime_type or '').startswith('image/'):
+        if (m.document.file_size or 0) > 8 * 1024 * 1024:
+            raise RuntimeError('rasm juda katta (8 MB dan oshmasin)')
+        fid = m.document.file_id
+    else:
+        return None
+    f = bot.get_file(fid)
+    return bot.download_file(f.file_path)
+
+
+@bot.message_handler(content_types=['photo', 'document'])
+def on_image(m):
+    if not guard(m):
+        return
+    if not vision.enabled():
+        return safe_send(m.chat.id, "🖼 Skrinshot tahlili o'chiq: Vercel'da <code>ANTHROPIC_API_KEY</code> o'rnatilmagan.\n"
+                                    "Bot o'zi chizgan grafik uchun <b>rasm</b> yoki <b>ict</b> deb yozing.")
+    try:
+        img = _image_bytes(m)
+    except Exception as e:  # noqa: BLE001
+        log.exception('download')
+        return safe_send(m.chat.id, "⚠️ Rasmni yuklab bo'lmadi: %s" % esc(e))
+    if img is None:
+        return safe_send(m.chat.id, "Faqat rasm (skrinshot) yuboring.")
+    safe_send(m.chat.id, "🔍 Skrinshot ICT/SMC bo'yicha tahlil qilinmoqda, 10-30 soniya...")
+    try:
+        txt = vision.analyze(img, question=(m.caption or '').strip(), context=_ict_context())
+    except Exception as e:  # noqa: BLE001
+        log.exception('vision')
+        return safe_send(m.chat.id, "⚠️ Tahlil bajarilmadi: %s" % esc(e))
+    body = esc(txt)
+    for i in range(0, len(body), 3800):
+        safe_send(m.chat.id, ("🖼 <b>Skrinshot tahlili</b>\n\n" if i == 0 else '') + body[i:i + 3800]
+                  + ("\n\n<i>AI tahlili, kafolat emas.</i>" if i + 3800 >= len(body) else ''))
 
 
 # ----------------------------------------------------------------- HTTP

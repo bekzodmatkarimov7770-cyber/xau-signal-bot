@@ -505,10 +505,11 @@ def _stats(trades, extra):
     return out
 
 
-def backtest(c, cfg=CFG, cost=None):
+def backtest(c, cfg=CFG, cost=None, finder=None):
     """Tarixiy M15 seriyada signallarni sham-sham o'ynatadi (kelajakka qaramasdan).
     Bir vaqtda bitta pozitsiya. Noaniq holatda (bir shamda ham SL, ham TP) SL hisoblanadi."""
     cost = cfg['cost'] if cost is None else cost
+    finder = finder or find_signal
     P = Prep(c, cfg)
     T, V, N = P.T, P.v[1], len(c)
     extra = {'signals': 0, 'expired': 0, 'missed': 0, 'bars': 0, 'from': T[0] if T else 0,
@@ -561,7 +562,7 @@ def backtest(c, cfg=CFG, cost=None):
                     close(pos, 'TIME', c_, i)
                     pos = None
         if pend is None and pos is None and i < N - 1:
-            sig, _ = find_signal(P, i, cfg)
+            sig, _ = finder(P, i, cfg)
             if sig and sig['key'] not in seen:
                 seen.add(sig['key'])
                 extra['signals'] += 1
