@@ -1,4 +1,4 @@
-"""XAUUSD M15 shamlarini olish.
+"""XAUUSD shamlarini olish (M15 asosiy, Fibo uchun M1 va M5 ham).
 
 Asosiy manba: Twelve Data (XAU/USD spot, bepul API kalit bilan).
 Zaxira manba: Yahoo Finance GC=F (COMEX oltin fyucherslari, kalitsiz; narxi spotdan biroz farq qiladi).
@@ -53,30 +53,39 @@ def clean(c):
     return out
 
 
-def drop_incomplete(c, now=None):
-    """Hali yopilmagan oxirgi shamni olib tashlaydi."""
+def drop_incomplete(c, now=None, step=900):
+    """Hali yopilmagan oxirgi shamni olib tashlaydi. step: sham uzunligi (sekund)."""
     now = time.time() if now is None else now
-    while c and c[-1]['t'] + 900 > now:
+    while c and c[-1]['t'] + step > now:
         c = c[:-1]
     return c
 
 
-def fetch_m15(n=3000, timeout=15):
-    """(shamlar, manba_nomi). Kalit bo'lmasa yoki xato bo'lsa, zaxira manbaga o'tadi."""
+YAHOO_RANGE = {1: '7d', 5: '60d', 15: '60d'}
+
+
+def fetch_tf(minutes, n=3000, timeout=15):
+    """Istalgan taymfreym (1, 5 yoki 15 daqiqa): (shamlar, manba_nomi).
+    Kalit bo'lmasa yoki xato bo'lsa, zaxira manbaga (Yahoo GC=F) o'tadi."""
     key = os.environ.get('TWELVE_API_KEY')
     err = None
     if key:
         try:
             r = requests.get('https://api.twelvedata.com/time_series', timeout=timeout, headers=UA,
-                             params={'symbol': 'XAU/USD', 'interval': '15min', 'outputsize': min(n, 5000),
+                             params={'symbol': 'XAU/USD', 'interval': '%dmin' % minutes, 'outputsize': min(n, 5000),
                                      'timezone': 'UTC', 'order': 'ASC', 'apikey': key})
-            return clean(parse_twelve(r.json())), 'XAU/USD (Twelve Data)'
+            return clean(parse_twelve(r.json()))[-n:], 'XAU/USD (Twelve Data)'
         except Exception as e:  # noqa: BLE001
             err = str(e)
     try:
         r = requests.get('https://query1.finance.yahoo.com/v8/finance/chart/GC=F', timeout=timeout,
-                         headers=UA, params={'interval': '15m', 'range': '60d'})
+                         headers=UA, params={'interval': '%dm' % minutes, 'range': YAHOO_RANGE.get(minutes, '60d')})
         c = clean(parse_yahoo(r.json()))
         return c[-n:], 'GC=F (Yahoo, fyuchers)'
     except Exception as e:  # noqa: BLE001
         raise RuntimeError('Ma\'lumot olib bo\'lmadi. %s | Yahoo: %s' % (err or 'TWELVE_API_KEY yo\'q', e))
+
+
+def fetch_m15(n=3000, timeout=15):
+    """(shamlar, manba_nomi). Kalit bo'lmasa yoki xato bo'lsa, zaxira manbaga o'tadi."""
+    return fetch_tf(15, n, timeout)

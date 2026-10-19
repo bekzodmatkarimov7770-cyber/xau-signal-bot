@@ -8,6 +8,7 @@ Muhit o'zgaruvchilari (Vercel > Settings > Environment Variables):
   CRON_SECRET      - /scan uchun kalit (bo'lmasa WEBHOOK_SECRET ishlatiladi)
   MIN_SCORE, MIN_RR, ENTRY_TIMEOUT - ixtiyoriy sozlamalar
   ICT_MIN_SCORE    - ICT signal uchun minimal ball (10 dan, standart 7)
+  FIBO_MIN_SCORE   - Fibo + SNR signal uchun minimal ball (10 dan, standart 7)
   ANTHROPIC_API_KEY - skrinshot tahlili uchun (ixtiyoriy; bo'lmasa rasm tahlili o'chiq)
   UPSTASH_REDIS_REST_URL / _TOKEN yoki KV_REST_API_URL / _TOKEN - ixtiyoriy doimiy baza
 """
@@ -25,6 +26,7 @@ import telebot  # noqa: E402
 from flask import Flask, jsonify, request  # noqa: E402
 
 import _data as data  # noqa: E402
+import _fibo as fibo  # noqa: E402
 import _ict as ict  # noqa: E402
 import _smc as smc  # noqa: E402
 import _store as store  # noqa: E402
@@ -53,6 +55,13 @@ if os.environ.get('ICT_MIN_SCORE'):
         ICT_CFG['min_score'] = int(os.environ['ICT_MIN_SCORE'])
     except ValueError:
         log.warning("ICT_MIN_SCORE noto'g'ri: %s", os.environ['ICT_MIN_SCORE'])
+
+FIBO_CFG = dict(fibo.CFG)
+if os.environ.get('FIBO_MIN_SCORE'):
+    try:
+        FIBO_CFG['min_score'] = int(os.environ['FIBO_MIN_SCORE'])
+    except ValueError:
+        log.warning("FIBO_MIN_SCORE noto'g'ri: %s", os.environ['FIBO_MIN_SCORE'])
 
 bot = telebot.TeleBot(BOT_TOKEN or '0:missing', threaded=False)
 app = Flask(__name__)
@@ -266,10 +275,11 @@ def cmd_start(m):
     if not guard(m):
         return
     safe_send(m.chat.id,
-              "<b>XAUUSD signal bot</b>\nSMC + Liquidity Sweep + Classic SNR, alohida ICT modeli\n\n"
+              "<b>XAUUSD signal bot</b>\nSMC + Liquidity Sweep + Classic SNR, alohida ICT va Fibo modellari\n\n"
               "<b>signal</b> deb yozing: SMC bo'yicha jonli tahlil\n"
               "<b>ict</b> deb yozing: ICT bo'yicha alohida tahlil, signal va grafik rasm\n"
               "<b>rasm</b> deb yozing: zonalar va likvidlik chizilgan grafik\n"
+              "<b>fibo</b> deb yozing: M15/M5/M1 trend bo'yicha avto Fibo + SNR signal va grafik\n"
               "📷 Grafik skrinshotini yuboring: AI uni ICT/SMC bo'yicha tahlil qiladi\n\n"
               "/zones - narx atrofidagi SNR zonalar va likvidlik\n"
               "/backtest - SMC strategiyasini tarixda sinash\n"
@@ -656,6 +666,216 @@ def cmd_ict_backtest(m):
         log.exception('ictbacktest')
         return safe_send(m.chat.id, "⚠️ Backtest bajarilmadi: %s" % esc(e))
     safe_send(m.chat.id, fmt_backtest(r, src).replace('📊 <b>Backtest', '📊 <b>ICT backtest', 1))
+
+
+# ----------------------------------------------------------------- Auto Fibo + SNR (alohida model)
+TREND_UZ = {'up': 'yuqoriga 📈', 'down': 'pastga 📉', None: "aniq emas (range)"}
+FIB_SHOW = (0.236, 0.382, 0.5, 0.618, 0.786)
+
+
+def load_fibo():
+    """M15 (jonli), M5 va M1 yopilgan shamlar. Bozor yopiq yoki xato bo'lsa RuntimeError."""
+    c15, src, forming, price = load_live(3000)
+    if len(c15) < 900:
+        raise RuntimeError("tahlil uchun ma'lumot yetarli emas (%d sham)" % len(c15))
+    age_min = (time.time() - (c15[-1]['t'] + 900)) / 60.0
+    if age_min > 90:
+        raise RuntimeError("⏸ Oltin bozori hozir yopiq (oxirgi sham %d daqiqa oldin, narx %.2f)." % (age_min, price))
+    raw5, _ = data.fetch_tf(5, 600)
+    raw1, _ = data.fetch_tf(1, 600)
+    c5, c1 = data.drop_incomplete(raw5, step=300), data.drop_incomplete(raw1, step=60)
+    if len(c5) < 100 or len(c1) < 100:
+        raise RuntimeError("M5/M1 ma'lumoti yetarli emas (M5 %d, M1 %d sham)" % (len(c5), len(c1)))
+    return {'c15': c15, 'c5': c5, 'c1': c1, 'src': src, 'price': raw1[-1]['c'] if raw1 else price}
+
+
+def _fib_zones(c15):
+    """SNR zonalar: H4 (asosiy) + M15 (lokal). Qaytaradi: (zonalar, H4 yo'nalish)."""
+    P = smc.Prep(c15, CFG)
+    mp = smc.market_map(P, len(c15) - 1, CFG)
+    zones, bias = [], None
+    if mp:
+        zones = [dict(z, src='H4') for z in mp['all_zones']]
+        bias = 'down' if mp['bias'] == 'pastga' else 'up'
+    return zones + fibo.m15_zones(c15, FIBO_CFG), bias
+
+
+def fibo_analyze(c15, c5, c1):
+    f15 = fibo.analyze_tf(c15, 'M15', FIBO_CFG)
+    f5 = fibo.analyze_tf(c5, 'M5', FIBO_CFG)
+    f1 = fibo.analyze_tf(c1, 'M1', FIBO_CFG)
+    zones, bias = _fib_zones(c15)
+    sig, diag = fibo.find_signal(f15, f5, f1, zones, FIBO_CFG, h4_bias=bias)
+    return f15, f5, f1, zones, bias, sig, diag
+
+
+def _fmt_tf(f):
+    L = ["<b>%s</b>: trend %s" % (f['tf'], TREND_UZ[f['trend']])]
+    fb = f.get('fib')
+    if not fb:
+        L.append("   Fibo tortilmadi (aniq impuls yo'q)")
+        return L
+    up = fb['dir'] == 1
+    L.append("   Fibo: %s %.2f ➜ %s %.2f  (oyoq $%.1f)" % ('low' if up else 'high', fb['A'], 'high' if up else 'low',
+                                                     fb['B'], fb['R']))
+    L.append('   ' + ' | '.join('%s: %.2f' % (('%g' % r), fb['levels'][r]) for r in FIB_SHOW))
+    L.append("   Golden zone (0.5-0.786): <b>%.2f - %.2f</b>" % fb['gz'])
+    if fb['depth'] is not None:
+        L.append("   Qaytish: eng chuqur %.3f (%.2f), hozir %.3f" % (fb['depth'], fb['pl'], fb['retr']))
+    else:
+        L.append("   Narx hali impuls cho'qqisida, qaytish yo'q")
+    return L
+
+
+def fmt_fibo_signal(s):
+    sell = s['side'] == 'SELL'
+    em = '🟥' if sell else '🟩'
+    z = s['zone']
+    L = ["%s <b>FIBO %s XAUUSD</b>  |  ball %d/%d" % (em, s['side'], s['score'], fibo.MAX_SCORE),
+         "📍 Kirish (hozir): <b>%.2f</b>" % s['entry'],
+         "🛑 SL: <b>%.2f</b>  (xavf $%.2f)" % (s['sl'], s['risk']),
+         "🎯 TP1: <b>%.2f</b>  (1:%.1f, %s)" % (s['tp'], s['rr'], esc(s['tp1k'])),
+         "🎯 TP2: <b>%.2f</b>  (1:%.1f, Fibo 1.272)" % (s['tp2'], s['rr2']),
+         "🎯 TP3: <b>%.2f</b>  (Fibo 1.618)" % s['tp3'],
+         '', '<b>Nima uchun:</b>',
+         "• M15 va M5 trend: %s" % ('pastga' if sell else 'yuqoriga'),
+         "• M15 Fibo %.2f ➜ %.2f, narx %.3f gacha qaytdi (%.2f)" % (s['A'], s['B'], s['depth'], s['pl']),
+         "• SNR (%s): %.2f - %.2f, %d marta qaytgan" % (z['src'], z['lo'], z['hi'], z['touches']),
+         "• M1 da %s BOS bo'ldi (tasdiq)" % ('pastga' if sell else 'yuqoriga'),
+         "• Chuqur qaytish (0.618+) yoki M5 golden zone: %s" % ('✅' if s['deep'] or s['m5_gz'] else '—'),
+         "• H4 yo'nalish mos: %s" % ('✅' if s['bias_ok'] else '⚠️ mos emas'),
+         '',
+         "❗️ TP1 da yarmini yoping va SL ni kirishga suring.",
+         "⚠️ Kafolat yo'q. Bitta savdoda balansning 0.5-1% idan ko'p xavf qilmang."]
+    return '\n'.join(L)
+
+
+def _fibo_plan(diag, f15, f5, f1, zones):
+    st = diag.get('stage')
+    fb = f15.get('fib')
+    sell = diag.get('side') == 'SELL'
+    if st == 'data':
+        return "ma'lumot yetarli emas."
+    if st == 'no_trend':
+        return "M15 da aniq trend yo'q (range). Trend bo'lmasa Fibo tortilmaydi."
+    if st == 'no_leg':
+        return "M15 trend bor, lekin Fibo uchun yetarli impuls yo'q."
+    if st == 'tf_conflict':
+        return ("M15 %s, M5 %s: trendlar mos emas. M5 ham M15 tomonga burilishini kuting."
+                % (TREND_UZ[f15['trend']], TREND_UZ[f5['trend']]))
+    if st == 'not_in_zone':
+        return ("narx M15 golden zone <b>%.2f - %.2f</b> ga qaytishini kuting (%s uchun)."
+                % (fb['gz'][0], fb['gz'][1], 'SELL' if sell else 'BUY'))
+    if st == 'too_deep':
+        return ("qaytish 0.886 dan chuqur: impuls kuchsizlangan. %.2f buzilsa trend o'zgaradi."
+                % fb['A'])
+    if st == 'ran_away':
+        return "narx zonadan qaytib ketgan, kirish kech. Yangi qaytishni kuting."
+    if st == 'no_snr':
+        glo, ghi = fb['gz']
+        inz = [z for z in zones if z['hi'] >= glo and z['lo'] <= ghi]
+        txt = ("qaytish nuqtasi %.2f da SNR zona yo'q, shuning uchun signal yo'q." % fb['pl'])
+        if inz:
+            txt += " Golden zone ichidagi SNR: " + ', '.join('%.2f-%.2f (%s)' % (z['lo'], z['hi'], z['src']) for z in inz[:3])
+        return txt
+    if st == 'no_trigger':
+        z = diag.get('zone', {})
+        lv = diag.get('m1_level')
+        txt = ("narx Fibo + SNR zonasida (%.2f - %.2f, %s) ✅. Endi M1 da %s BOS kutiladi"
+               % (z.get('lo', 0), z.get('hi', 0), z.get('src', ''), 'pastga' if sell else 'yuqoriga'))
+        if lv:
+            txt += ": M1 sham <b>%.2f</b> %s yopilsa tasdiq" % (lv['p'], 'ostida' if sell else 'ustida')
+        return txt + '.'
+    if st == 'risk_fail':
+        return "SL masofasi mos kelmadi (juda yaqin yoki juda uzoq)."
+    if st == 'rr_fail':
+        return "TP gacha foyda/xavf nisbati yetarli emas (TP2 kamida 1:%.1f)." % FIBO_CFG['min_rr']
+    if st == 'score_low':
+        return "ball yetarli emas (%s/%d)." % (diag.get('score', '?'), fibo.MAX_SCORE)
+    return st or ''
+
+
+def build_fibo(c15, c5, c1, src, price):
+    """Qaytaradi: (matn, signal|None, (f15, f5, f1, zones))."""
+    f15, f5, f1, zones, bias, sig, diag = fibo_analyze(c15, c5, c1)
+    L = ["📐 <b>XAUUSD Auto Fibo + SNR</b>", "Narx: <b>%.2f</b>  (%s, Toshkent)" % (price, tkh(time.time())),
+         "H4 yo'nalish: %s" % TREND_UZ[bias], '']
+    for f in (f15, f5, f1):
+        L += _fmt_tf(f)
+    L.append('')
+    if sig:
+        L += ["🔔 <b>FIBO SIGNAL BOR</b>", '', fmt_fibo_signal(sig)]
+    else:
+        L += ["🎯 <b>Fibo signal: hozircha yo'q</b>", "   ➜ " + _fibo_plan(diag, f15, f5, f1, zones)]
+    near = sorted(zones, key=lambda z: abs((z['lo'] + z['hi']) / 2 - price))[:4]
+    if near:
+        L += ['', '🧱 <b>Eng yaqin SNR zonalar:</b>']
+        for z in sorted(near, key=lambda z: -z['hi']):
+            mark = '⬆️' if z['lo'] > price else ('⬇️' if z['hi'] < price else '➡️')
+            L.append('%s %.2f - %.2f  (%s, %d marta)' % (mark, z['lo'], z['hi'], z['src'], z['touches']))
+    L += ['', "<i>Fibo qoidalar asosida avtomatik tortiladi (bir xil shamlar = bir xil Fibo). "
+              "Signal kafolat emas. Manba: %s</i>" % esc(src)]
+    return '\n'.join(L), sig, (f15, f5, f1, zones)
+
+
+def chart_fibo(c, f, zones, sig, step):
+    import _chart as chart
+    levels, boxes, marks, zs = [], [], [], []
+    fb = f.get('fib')
+    if fb:
+        for r in fibo.LEVELS:
+            col = chart.COL['gz'] if r in (0.5, 0.618, 0.786) else chart.COL['fib']
+            levels.append((fb['levels'][r], '%g  %.2f' % (r, fb['levels'][r]), col, '-' if r in (0.0, 1.0) else '--'))
+        for e in fibo.EXT:
+            levels.append((fb['ext'][e], '%g  %.2f' % (e, fb['ext'][e]), chart.COL['ext'], ':'))
+        boxes.append((fb['A_t'], c[-1]['t'] + step * 6, fb['gz'][0], fb['gz'][1], 'Golden zone', chart.COL['gz']))
+        marks += [(fb['A_t'], fb['A'], 'A'), (fb['B_t'], fb['B'], 'B')]
+    for z in zones:
+        zs.append((z['lo'], z['hi'], 'SNR %s x%d' % (z['src'], z['touches']), chart.COL['zone']))
+    title = 'XAUUSD %s Auto Fibo | trend: %s' % (f['tf'], {'up': 'yuqoriga', 'down': 'pastga'}.get(f['trend'], 'range'))
+    if sig:
+        title += ' | %s signal, ball %d/%d' % (sig['side'], sig['score'], fibo.MAX_SCORE)
+    return chart.render(c, title=title, zones=zs, levels=levels, boxes=boxes, signal=sig, marks=marks,
+                        note="Sariq: golden zone (0.5-0.786), yashil: TP kengaytmalari, binafsha: SNR.",
+                        step=step, tf=f['tf'])
+
+
+def _fibo_reply(chat_id):
+    try:
+        d = load_fibo()
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if msg.startswith('⏸'):
+            log.info('load_fibo: %s', msg)
+        else:
+            log.exception('load_fibo')
+        return safe_send(chat_id, esc(msg) if msg.startswith('⏸') else "⚠️ Narx ma'lumotini olib bo'lmadi: %s" % esc(msg))
+    try:
+        text, sig, (f15, f5, _, zones) = build_fibo(d['c15'], d['c5'], d['c1'], d['src'], d['price'])
+    except Exception as e:  # noqa: BLE001
+        log.exception('fibo')
+        return safe_send(chat_id, "⚠️ Fibo tahlil bajarilmadi: %s" % esc(e))
+    if sig and store.claim(sig['key']):
+        store.save_signal(sig)
+    safe_send(chat_id, text)
+    for c, f, step in ((d['c15'], f15, 900), (d['c5'], f5, 300)):
+        try:
+            near = sorted(zones, key=lambda z: abs((z['lo'] + z['hi']) / 2 - d['price']))[:6]
+            send_photo(chat_id, chart_fibo(c, f, near, sig, step), caption='📐 %s Auto Fibo' % f['tf'])
+        except Exception:  # noqa: BLE001
+            log.exception('chart_fibo')
+
+
+@bot.message_handler(commands=['fibo', 'fib'])
+def cmd_fibo(m):
+    if guard(m):
+        _fibo_reply(m.chat.id)
+
+
+@bot.message_handler(func=lambda m: bool(getattr(m, 'text', None)) and m.text.strip().lower().strip('!.?') in ('fibo', 'fib', 'фибо', 'fibo signal'))
+def txt_fibo(m):
+    if guard(m):
+        _fibo_reply(m.chat.id)
 
 
 def _image_bytes(m):

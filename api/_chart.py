@@ -11,6 +11,7 @@ os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib')
 BG, FG, GRID = '#0f1419', '#d7dde4', '#1e2630'
 UP, DOWN = '#26a69a', '#ef5350'
 COL = {'zone': '#8e7cc3', 'liq': '#f6c343', 'taken': '#6b7280', 'fvg': '#29b6f6', 'ote': '#ab47bc',
+       'fib': '#4dd0e1', 'gz': '#ffb300', 'ext': '#81c784',
        'asia': '#5c6bc0', 'london': '#26c6da', 'mo': '#ff9800', 'entry': '#e0e0e0', 'sl': DOWN, 'tp': UP}
 
 
@@ -18,7 +19,7 @@ def tk(t):
     return time.strftime('%H:%M', time.gmtime(t + 5 * 3600))
 
 
-def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), note=''):
+def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), note='', step=900, tf='M15'):
     """
     c      : yopilgan shamlar [{'t','o','h','l','c'}] (oxirgi ~120 tasi chiziladi)
     zones  : [(lo, hi, matn, rang)]        - butun kenglik bo'ylab gorizontal zona
@@ -26,6 +27,7 @@ def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), no
     boxes  : [(t0, t1, lo, hi, matn, rang)] - vaqt oralig'idagi to'rtburchak (FVG, Osiyo diapazoni)
     signal : {'side','entry','sl','tp','tp2'} yoki None
     marks  : [(t, narx, matn)]              - strelka bilan belgi (sweep, MSS)
+    step   : sham uzunligi sekundda (M1=60, M5=300, M15=900), tf: pastdagi yozuv uchun
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -42,7 +44,7 @@ def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), no
         if t <= T[0]:
             return -0.5
         if t >= T[-1]:
-            return len(T) - 1 + (t - T[-1]) / 900.0
+            return len(T) - 1 + (t - T[-1]) / float(step)
         lo, hi = 0, len(T) - 1
         while lo < hi:
             mid = (lo + hi + 1) // 2
@@ -50,7 +52,7 @@ def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), no
                 lo = mid
             else:
                 hi = mid - 1
-        return lo + (t - T[lo]) / 900.0
+        return lo + (t - T[lo]) / float(step)
 
     n = len(c)
     right = n + 14
@@ -68,6 +70,8 @@ def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), no
     ys = [lo_p, hi_p]
     if signal:
         ys += [signal['sl'], signal['tp'], signal['entry']]
+        if signal.get('tp2'):
+            ys.append(signal['tp2'])
     span = max(ys) - min(ys)
     ymin, ymax = min(ys) - span * 0.06, max(ys) + span * 0.06
 
@@ -129,14 +133,14 @@ def render(c, title='', zones=(), levels=(), boxes=(), signal=None, marks=(), no
     ax.text(n + 0.5, last, ' %.2f' % last, color=BG, fontsize=8, va='center',
             bbox=dict(facecolor='#90a4ae', edgecolor='none', pad=1.2))
 
-    step = max(1, n // 10)
-    ticks = list(range(0, n, step))
+    every = max(1, n // 10)
+    ticks = list(range(0, n, every))
     ax.set_xticks(ticks)
     ax.set_xticklabels([tk(T[i]) for i in ticks])
     ax.set_xlim(-1, right + 6)
     ax.set_ylim(ymin, ymax)
     ax.set_title(title, color=FG, fontsize=11, loc='left')
-    foot = 'M15, Toshkent vaqti. %s' % note if note else 'M15, Toshkent vaqti'
+    foot = '%s, Toshkent vaqti. %s' % (tf, note) if note else '%s, Toshkent vaqti' % tf
     fig.text(0.01, 0.01, foot, color='#8a96a3', fontsize=7.5)
     fig.tight_layout(rect=(0, 0.02, 1, 1))
     buf = io.BytesIO()

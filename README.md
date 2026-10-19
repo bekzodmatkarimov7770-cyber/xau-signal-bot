@@ -1,4 +1,4 @@
-# XAUUSD signal bot: SMC + Liquidity Sweep + Classic SNR, alohida ICT modeli
+# XAUUSD signal bot: SMC + Liquidity Sweep + Classic SNR, alohida ICT va Auto Fibo modellari
 
 Bot faqat oltin (XAUUSD) uchun. U **o'zi xabar yubormaydi**: botga **signal** deb yozasiz,
 u shu zahoti jonli narx bilan bozorni tahlil qiladi (yo'nalish, SNR zonalar, likvidlik, signal yoki nimani kutish kerakligi).
@@ -27,6 +27,28 @@ Ball (10 dan): asos 5 + kuchli displacement 1 + OTE (0.62-0.79) bilan ustma-ust 
 Midnight Open'dan premium/discount tomonda 1 + tashqi likvidlik (Osiyo/PDH/PDL) 1. Standart chegara: 7 (`ICT_MIN_SCORE`).
 ICT signali faqat siz `ict` deb yozganda chiqadi, avtomatik skanerga qo'shilmagan.
 
+## Auto Fibo + SNR (alohida, `fibo` buyrug'i)
+Bot M15, M5 va M1 da trendni o'zi aniqlaydi va Fibo'ni o'zi tortadi. Qoidalar qat'iy:
+bir xil shamlar berilsa, Fibo har doim aynan bir xil nuqtalarga tortiladi.
+1. **Impuls**: strukturani buzgan (BOS) oyoq. A = impuls boshlangan swing (buzilmagan), B = eng chekka narx.
+2. **Trend**: oxirgi impuls qarama-qarshi impulsning boshini buzgan bo'lsa, trend o'sha tomonga.
+   Buzmagan bo'lsa, bu oddiy qaytish va trend o'zgarmaydi (0.618 gacha chuqur qaytish trendni buzmaydi).
+3. **Fibo darajalari**: 0.236, 0.382, 0.5, 0.618, 0.786, 1.0 va TP uchun 1.272, 1.618.
+4. **Signal shartlari** (hammasi majburiy):
+   - M15 va M5 trendi bir xil;
+   - narx M15 da golden zone (0.5-0.786) ga qaytgan (0.886 dan chuqur emas);
+   - qaytish nuqtasi SNR zonasida (H4 yoki M15, kamida 2 marta qaytgan joy);
+   - M1 da trend tomonga BOS bo'lgan (tasdiq).
+5. **Kirish**: M1 yopilish narxi. **SL**: qaytish cho'qqisi ortida. **TP1**: B (0 daraja yoki yo'ldagi SNR),
+   **TP2**: 1.272, **TP3**: 1.618. TP2 gacha kamida 1:2.
+
+Ball (10 dan): asos 6 + H4 SNR 1 + zona 3+ marta 1 + chuqur qaytish (0.618+) yoki M5 golden zone 1 +
+H4 EMA50 yo'nalishi mos 1. Standart chegara: 7 (`FIBO_MIN_SCORE`).
+Signal bo'lmasa, bot nimani kutish kerakligini aniq yozadi (masalan, "M1 sham 2017.71 ustida yopilsa tasdiq").
+Javob bilan M15 va M5 grafiklari keladi: Fibo darajalari, golden zone, SNR, kirish/SL/TP.
+`fibo` har chaqirilganda 3 ta so'rov ketadi (M15, M5, M1). Twelve Data bepul rejasida daqiqasiga 8 ta so'rov bor.
+Fibo signali faqat siz `fibo` deb yozganda chiqadi, avtomatik skanerga qo'shilmagan va hali backtest qilinmagan.
+
 ## Grafik rasm va skrinshot tahlili
 - `rasm` (yoki `/rasm`): bot M15 grafikni chizadi: SNR zonalar, likvidlik, SMC signal bo'lsa kirish/SL/TP.
 - `ict`: matnli tahlildan keyin ICT grafigi keladi (Osiyo/London qutilari, Midnight Open, FVG, OTE, sweep, MSS).
@@ -42,7 +64,7 @@ ICT signali faqat siz `ict` deb yozganda chiqadi, avtomatik skanerga qo'shilmaga
 3. **Vercel > Settings > Environment Variables**:
    - `BOT_TOKEN`, `ADMIN_ID`, `WEBHOOK_SECRET` (uzun tasodifiy so'z, faqat harf/raqam/_/-)
    - `TWELVE_API_KEY`
-   - ixtiyoriy: `CRON_SECRET`, `MIN_SCORE`, `MIN_RR`, `ENTRY_TIMEOUT`, `ICT_MIN_SCORE`
+   - ixtiyoriy: `CRON_SECRET`, `MIN_SCORE`, `MIN_RR`, `ENTRY_TIMEOUT`, `ICT_MIN_SCORE`, `FIBO_MIN_SCORE`
    - skrinshot tahlili uchun: `ANTHROPIC_API_KEY` (ixtiyoriy `AI_MODEL`)
    - tavsiya: Storage > Upstash Redis ulang (takroriy signal himoyasi doimiy bo'ladi)
 4. **Vercel > Settings > Deployment Protection**: "Vercel Authentication" ni **o'chiring**,
@@ -56,7 +78,7 @@ ICT signali faqat siz `ict` deb yozganda chiqadi, avtomatik skanerga qo'shilmaga
    (Vercel Hobby rejasida cron faqat kuniga bir marta ishlaydi, shuning uchun tashqi cron kerak.)
 
 ## Telegram buyruqlari (faqat ADMIN_ID)
-**`signal`** (yoki `/signal`) SMC jonli tahlil | **`ict`** ICT tahlil + grafik | **`rasm`** grafik rasm |
+**`signal`** (yoki `/signal`) SMC jonli tahlil | **`ict`** ICT tahlil + grafik | **`rasm`** grafik rasm | **`fibo`** Auto Fibo + SNR signal va grafik |
 📷 skrinshot yuborish: AI tahlili | `/zones` SNR zonalar va likvidlik xaritasi |
 `/backtest` SMC ni tarixda sinash | `/ictbacktest` ICT ni tarixda sinash | `/tarix` oxirgi signallar | `/sozlama`
 
@@ -67,4 +89,5 @@ ICT signali faqat siz `ict` deb yozganda chiqadi, avtomatik skanerga qo'shilmaga
 
 ## Testlar
 `python3 tests/test_smc.py` (SMC), `python3 tests/test_ict.py` (ICT), `python3 tests/test_bot.py` va
-`python3 tests/test_bot_ict.py` (server, grafik va skrinshot buyruqlari).
+`python3 tests/test_bot_ict.py` (server, grafik va skrinshot buyruqlari),
+`python3 tests/test_fibo.py` (Auto Fibo) va `python3 tests/test_bot_fibo.py` (`fibo` buyrug'i).
